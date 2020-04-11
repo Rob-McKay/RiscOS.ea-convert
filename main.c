@@ -1,3 +1,27 @@
+/*
+ * MIT License
+ *
+ * Copyright (c) 2020 Rob McKay
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+*/
+
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
@@ -7,12 +31,11 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include <sys/stat.h>
+
 #define MAX_PATH 2048
 
-/* RISCOS attributes */
-#define ROA_READ   ((1<<0) | (1<<4))
-#define ROA_WRITE  2
-#define ROA_LOCKED 8
+#define DEFAULT_FILE_TYPE 0xFFFu
 
 #pragma pack(push, 4)
 
@@ -31,24 +54,42 @@ typedef struct
 
 #pragma pack(pop)
 
-static bool file_exists(const char* name)
+static bool is_directory(const char* base_path, const char* name)
 {
-	FILE* file = fopen(name, "rb");
+	struct stat file_stat;
+	char buffer[MAX_PATH];
 
-	if (file)
+	int count = snprintf(buffer, sizeof(buffer), "%s/%s", base_path, name);
+
+	if (stat(buffer, &file_stat) == 0)
 	{
-		fclose(file);
+		if (file_stat.st_mode & S_IFDIR)
+			return true;
+	}
+
+	return false;
+}
+
+static bool file_exists(const char* base_path, const char* name)
+{
+	struct stat file_stat;
+	char buffer[MAX_PATH];
+
+	int count = snprintf(buffer, sizeof(buffer), "%s/%s", base_path, name);
+
+	if (stat(buffer, &file_stat) == 0)
+	{
 		return true;
 	}
 
 	return false;
 }
 
-static void process_record(const EA_RECORD* record)
+static void process_record(const EA_RECORD* record, const char* base_path)
 {
 	if (record->filename[0] != 0) /* The record is in use */
 	{
-		char filename[20];
+		char filename[40];
 
 		/*                                                         11 */
 		/*                    0123456789                 012345678901 */
@@ -64,16 +105,44 @@ static void process_record(const EA_RECORD* record)
 			strcpy(filename, record->filename);
 		}
 
-		printf("Found file entry '%s': Load %08X Exec %08X Flags %08X\n", filename, record->attr.loadaddr, record->attr.execaddr, record->attr.flags);
-
-		// TODO Determine if the load and exec addr specify a file type and append to the name if they do
-
-		/* File is different */
-		if ((strcmp(filename, record->filename) != 0) && file_exists(record->filename))
+		if (!is_directory(base_path, record->filename))
 		{
-			printf("TODO: Rename file %s to %s\n", record->filename, filename);
+			if ((record->attr.loadaddr & 0xFFF00000) == 0xFFF00000) /* file has type and date */
+			{
+				int file_type = (record->attr.loadaddr & ~0xFFF00000u) >> 8;
+
+				if (file_type != DEFAULT_FILE_TYPE)
+				{
+					char suffix[20];
+					sprintf(suffix, ",%x", file_type);
+					strcat(filename, suffix);
+				}
+			}
+			else /* File has load and exec addresses */
+			{
+				char suffix[20];
+				sprintf(suffix, ",%x-%x", record->attr.loadaddr, record->attr.execaddr);
+				strcat(filename, suffix);
+			}
 		}
 
+		/* File is different */
+		if ((strcmp(filename, record->filename) != 0) && file_exists(base_path, record->filename))
+		{
+			char orig_name[MAX_PATH];
+			char new_name[MAX_PATH];
+
+			printf("Found file entry '%s': Load %08X Exec %08X Flags %08X\n", filename, record->attr.loadaddr, record->attr.execaddr, record->attr.flags);
+
+			snprintf(orig_name, sizeof(orig_name), "%s/%s", base_path, record->filename);
+			snprintf(new_name, sizeof(new_name), "%s/%s", base_path, filename);
+
+			printf("Renaming '%s' to '%s'\n", orig_name, new_name);
+			if (rename(orig_name, new_name))
+			{
+				fprintf(stderr, "Failed to rename '%s' to '%s': %s\n", orig_name, new_name, strerror(errno));
+			}
+		}
 	}
 }
 
@@ -108,7 +177,7 @@ int main(int argc, char* argv[])
 
 		if (fread(&record, sizeof(record), 1, riscos_ea) == 1)
 		{
-			process_record(&record);
+			process_record(&record, argv[1]);
 		}
 	}
 
